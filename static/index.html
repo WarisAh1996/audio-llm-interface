@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio LLM Interface</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .recording-controls {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
+        }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        #recordButton {
+            background-color: #ff4444;
+            color: white;
+        }
+        #recordButton.recording {
+            background-color: #cc0000;
+        }
+        .response-area {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            min-height: 100px;
+        }
+        .status {
+            margin-top: 10px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Audio LLM Interface</h1>
+        
+        <div class="recording-controls">
+            <button id="recordButton">Start Recording</button>
+        </div>
+
+        <div class="status" id="status">Ready to record...</div>
+
+        <div class="response-area">
+            <h3>Model Response:</h3>
+            <div id="modelResponse">No response yet</div>
+        </div>
+    </div>
+
+    <script>
+        let mediaRecorder;
+        let audioChunks = [];
+        let isRecording = false;
+
+        async function setupRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        channelCount: 1,
+                        sampleRate: 16000
+                    } 
+                });
+                
+                mediaRecorder = new MediaRecorder(stream, {
+                    mimeType: 'audio/webm'
+                });
+
+                mediaRecorder.ondataavailable = (event) => {
+                    audioChunks.push(event.data);
+                };
+
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    await sendAudioToServer(audioBlob);
+                };
+
+                const recordButton = document.getElementById('recordButton');
+                recordButton.addEventListener('click', toggleRecording);
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                document.getElementById('status').textContent = 'Error accessing microphone. Please ensure microphone permissions are granted.';
+            }
+        }
+
+        function toggleRecording() {
+            const recordButton = document.getElementById('recordButton');
+            const statusDiv = document.getElementById('status');
+
+            if (!isRecording) {
+                audioChunks = [];
+                mediaRecorder.start();
+                isRecording = true;
+                recordButton.textContent = 'Stop Recording';
+                recordButton.classList.add('recording');
+                statusDiv.textContent = 'Recording...';
+            } else {
+                mediaRecorder.stop();
+                isRecording = false;
+                recordButton.textContent = 'Start Recording';
+                recordButton.classList.remove('recording');
+                statusDiv.textContent = 'Processing audio...';
+            }
+        }
+
+        async function sendAudioToServer(audioBlob) {
+            try {
+                const formData = new FormData();
+                formData.append('audio_file', audioBlob, 'recording.webm');
+
+                const response = await fetch('/upload-audio', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                const statusDiv = document.getElementById('status');
+                const modelResponse = document.getElementById('modelResponse');
+                
+                if (data.status === 'success') {
+                    modelResponse.textContent = data.model_output;
+                    statusDiv.textContent = 'Processing complete!';
+                } else {
+                    throw new Error(data.message || 'Unknown error occurred');
+                }
+            } catch (error) {
+                console.error('Error sending audio:', error);
+                document.getElementById('status').textContent = 'Error processing audio: ' + error.message;
+            }
+        }
+
+        setupRecording();
+    </script>
+</body>
+</html>
