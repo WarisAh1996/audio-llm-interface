@@ -6,12 +6,16 @@ import os
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import uuid
-import io
-import numpy as np
-import sys
+import logging
+import whisper
+import tempfile
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import requests
 
-# Add the psychology-alpaca model directory to path
-sys.path.append(r"C:\Users\Waris\psychology-alpaca")
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -36,9 +40,27 @@ supabase: Client = create_client(
     os.getenv("SUPABASE_KEY", "")
 )
 
+# Global variables for Whisper model
+model = None
+model_lock = asyncio.Lock()
+executor = ThreadPoolExecutor(max_workers=1)
+
+async def load_whisper_model():
+    """Load Whisper model asynchronously"""
+    global model
+    if model is None:
+        async with model_lock:
+            if model is None:  # Double-check pattern
+                logger.info("Loading Whisper model (tiny)...")
+                loop = asyncio.get_event_loop()
+                model = await loop.run_in_executor(executor, whisper.load_model, "tiny")
+                logger.info("Whisper model loaded successfully")
+    return model
+
 @app.post("/upload-audio")
 async def upload_audio(audio_file: UploadFile = File(...)):
     try:
+        logger.info("Received audio upload request")
         # Read the audio file
         contents = await audio_file.read()
         
@@ -47,8 +69,9 @@ async def upload_audio(audio_file: UploadFile = File(...)):
         file_name = f"{file_id}.webm"
         
         try:
-            # Upload the original WebM file
-            result = supabase.storage.from_("audio").upload(
+            # Upload the original WebM file to Supabase Storage
+            logger.info("Uploading audio to Supabase Storage")
+            storage_result = supabase.storage.from_("audio").upload(
                 path=file_name,
                 file=contents,
                 file_options={"content-type": "audio/webm"}
@@ -56,69 +79,100 @@ async def upload_audio(audio_file: UploadFile = File(...)):
             
             # Get the public URL for the uploaded file
             audio_url = supabase.storage.from_("audio").get_public_url(file_name)
+            logger.info("Audio uploaded successfully to storage: %s", audio_url)
+            
+            # Insert initial record into audio_responses table
+            logger.info("Inserting record into audio_responses table")
+            data = {
+                "id": file_id,
+                "audio_recording": audio_url,
+                "input_transcription": None,
+                "model_output": None,
+                "output_audio": None
+            }
+            
+            db_result = supabase.table("audio_responses").insert(data).execute()
+            logger.info("Database record created successfully")
+            
+            # Start transcription process in background
+            # Pass the original audio content to avoid downloading again
+            asyncio.create_task(process_transcription(file_id, contents))
+            
+            return JSONResponse({
+                "status": "success",
+                "message": "Audio uploaded successfully, transcription in progress",
+                "file_id": file_id,
+                "audio_url": audio_url
+            })
             
         except Exception as upload_error:
-            print(f"Upload error: {str(upload_error)}")
+            logger.error("Upload error: %s", str(upload_error))
             return JSONResponse({
                 "status": "error",
                 "message": f"Error uploading to Supabase: {str(upload_error)}"
             }, status_code=500)
         
-        # For now, we'll just pass a placeholder audio data to the model
-        # When integrating with your model, you'll need to properly process the WebM audio
-        audio_data = np.zeros(1000)  # placeholder
-        
-        # Process audio with the LLM model
-        model_output = process_with_llm(audio_data)
-        
-        # Store the results in Supabase Database
-        data = {
-            "id": file_id,
-            "audio_path": audio_url,
-            "model_output": model_output,
-            "created_at": "now()"
-        }
-        
-        try:
-            result = supabase.table("audio_responses").insert(data).execute()
-        except Exception as db_error:
-            print(f"Database error: {str(db_error)}")
-            # Even if database insert fails, we'll return success since the file was uploaded
-            return JSONResponse({
-                "status": "partial_success",
-                "message": "Audio uploaded but database update failed",
-                "file_id": file_id,
-                "model_output": model_output
-            })
-        
-        return JSONResponse({
-            "status": "success",
-            "file_id": file_id,
-            "model_output": model_output,
-            "audio_url": audio_url
-        })
-        
     except Exception as e:
-        print(f"General error: {str(e)}")
+        logger.error("General error: %s", str(e))
         return JSONResponse({
             "status": "error",
             "message": str(e)
         }, status_code=500)
 
-def process_with_llm(audio_data):
-    # TODO: Implement the actual integration with your psychology-alpaca model
-    # This is where you'll need to:
-    # 1. Preprocess the audio data as required by your model
-    # 2. Load and run your trained model
-    # 3. Return the model's output
-    
-    # Placeholder return
-    return "Audio received successfully! Model integration pending."
+async def process_transcription(file_id: str, audio_data: bytes):
+    """Process transcription using the original audio data"""
+    temp_path = None
+    try:
+        # Save audio data to temporary file
+        with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as temp_file:
+            temp_file.write(audio_data)
+            temp_file.flush()  # Ensure all data is written
+            temp_path = temp_file.name
+            logger.info(f"Audio saved to temporary file: {temp_path}")
+
+        try:
+            logger.info(f"Starting transcription for file {file_id}")
+            
+            # Ensure model is loaded
+            model = await load_whisper_model()
+            
+            # Run transcription in thread pool
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(executor, model.transcribe, temp_path)
+            transcription = result["text"]
+            
+            logger.info(f"Transcription completed for file {file_id}")
+            
+            # Update the database record with transcription
+            supabase.table("audio_responses").update({
+                "input_transcription": transcription
+            }).eq("id", file_id).execute()
+            
+            logger.info(f"Database updated with transcription for file {file_id}")
+            
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+                logger.info(f"Temporary file deleted: {temp_path}")
+                
+    except Exception as e:
+        logger.error(f"Error in transcription process for file {file_id}: {str(e)}")
+        # Update database with error
+        try:
+            supabase.table("audio_responses").update({
+                "input_transcription": f"Error during transcription: {str(e)}"
+            }).eq("id", file_id).execute()
+        except:
+            pass
 
 @app.get("/")
 async def read_root():
     return FileResponse("static/index.html")
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+# Start loading the model when the server starts
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Starting server...")
+    # Start loading the model in the background
+    asyncio.create_task(load_whisper_model())

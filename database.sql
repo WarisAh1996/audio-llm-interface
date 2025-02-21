@@ -2,6 +2,7 @@
 CREATE TABLE IF NOT EXISTS public.audio_responses (
     id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
     audio_path text NOT NULL,
+    transcription text,
     model_output text,
     created_at timestamp with time zone DEFAULT timezone('utc'::text, now())
 );

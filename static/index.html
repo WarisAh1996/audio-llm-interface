@@ -37,15 +37,46 @@
         #recordButton.recording {
             background-color: #cc0000;
         }
-        .response-area {
+        .response-section {
             margin-top: 20px;
             padding: 15px;
             border: 1px solid #ddd;
             border-radius: 4px;
-            min-height: 100px;
+        }
+        .transcription-area, .analysis-area {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-radius: 4px;
         }
         .status {
             margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .status.uploading {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+        .status.processing {
+            background-color: #cce5ff;
+            color: #004085;
+        }
+        .status.success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        h3 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .loader {
+            display: none;
+            margin: 10px 0;
             color: #666;
         }
     </style>
@@ -60,9 +91,16 @@
 
         <div class="status" id="status">Ready to record...</div>
 
-        <div class="response-area">
-            <h3>Model Response:</h3>
-            <div id="modelResponse">No response yet</div>
+        <div class="response-section">
+            <div class="transcription-area">
+                <h3>Transcription:</h3>
+                <div id="transcription">No transcription yet</div>
+            </div>
+
+            <div class="analysis-area">
+                <h3>Psychological Analysis:</h3>
+                <div id="modelResponse">No analysis yet</div>
+            </div>
         </div>
     </div>
 
@@ -71,18 +109,16 @@
         let audioChunks = [];
         let isRecording = false;
 
+        function updateStatus(message, type) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.className = 'status ' + type;
+        }
+
         async function setupRecording() {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: {
-                        channelCount: 1,
-                        sampleRate: 16000
-                    } 
-                });
-                
-                mediaRecorder = new MediaRecorder(stream, {
-                    mimeType: 'audio/webm'
-                });
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
 
                 mediaRecorder.ondataavailable = (event) => {
                     audioChunks.push(event.data);
@@ -97,13 +133,12 @@
                 recordButton.addEventListener('click', toggleRecording);
             } catch (err) {
                 console.error('Error accessing microphone:', err);
-                document.getElementById('status').textContent = 'Error accessing microphone. Please ensure microphone permissions are granted.';
+                updateStatus('Error accessing microphone. Please ensure microphone permissions are granted.', 'error');
             }
         }
 
         function toggleRecording() {
             const recordButton = document.getElementById('recordButton');
-            const statusDiv = document.getElementById('status');
 
             if (!isRecording) {
                 audioChunks = [];
@@ -111,13 +146,13 @@
                 isRecording = true;
                 recordButton.textContent = 'Stop Recording';
                 recordButton.classList.add('recording');
-                statusDiv.textContent = 'Recording...';
+                updateStatus('Recording in progress...', 'uploading');
             } else {
                 mediaRecorder.stop();
                 isRecording = false;
                 recordButton.textContent = 'Start Recording';
                 recordButton.classList.remove('recording');
-                statusDiv.textContent = 'Processing audio...';
+                updateStatus('Uploading audio...', 'uploading');
             }
         }
 
@@ -126,24 +161,25 @@
                 const formData = new FormData();
                 formData.append('audio_file', audioBlob, 'recording.webm');
 
+                updateStatus('Uploading audio...', 'uploading');
+                
                 const response = await fetch('/upload-audio', {
                     method: 'POST',
                     body: formData
                 });
 
                 const data = await response.json();
-                const statusDiv = document.getElementById('status');
-                const modelResponse = document.getElementById('modelResponse');
                 
                 if (data.status === 'success') {
-                    modelResponse.textContent = data.model_output;
-                    statusDiv.textContent = 'Processing complete!';
+                    updateStatus('Processing complete!', 'success');
+                    document.getElementById('transcription').textContent = data.transcription || 'No transcription available';
+                    document.getElementById('modelResponse').textContent = data.model_output || 'No analysis available';
                 } else {
                     throw new Error(data.message || 'Unknown error occurred');
                 }
             } catch (error) {
                 console.error('Error sending audio:', error);
-                document.getElementById('status').textContent = 'Error processing audio: ' + error.message;
+                updateStatus('Error: ' + error.message, 'error');
             }
         }
 
